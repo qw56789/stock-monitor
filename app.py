@@ -3,6 +3,7 @@ import akshare as ak
 import pandas as pd
 from datetime import datetime, timedelta
 import time
+import random
 
 # 页面配置
 st.set_page_config(
@@ -15,14 +16,32 @@ st.set_page_config(
 st.title("📈 徐老板盯盘")
 st.markdown("---")
 
+# 重试装饰器
+def retry_on_failure(max_retries=3, delay=2):
+    """失败自动重试装饰器"""
+    def decorator(func):
+        def wrapper(*args, **kwargs):
+            for attempt in range(max_retries):
+                try:
+                    return func(*args, **kwargs)
+                except Exception as e:
+                    if attempt < max_retries - 1:
+                        wait_time = delay * (attempt + 1) + random.uniform(0, 1)
+                        time.sleep(wait_time)
+                    else:
+                        raise e
+            return None
+        return wrapper
+    return decorator
+
 # 缓存：获取所有A股实时行情（5分钟缓存）
 @st.cache_data(ttl=300, show_spinner=False)
+@retry_on_failure(max_retries=3, delay=3)
 def get_all_realtime_quotes():
-    """批量获取所有A股实时行情（东方财富数据源，速度更快）"""
+    """批量获取所有A股实时行情（带重试机制）"""
     try:
-        # 使用东方财富接口，一次获取所有股票行情
+        # 使用东方财富接口
         df = ak.stock_zh_a_spot_em()
-        # 重命名列
         df = df.rename(columns={
             '代码': 'code',
             '名称': 'name',
@@ -41,8 +60,16 @@ def get_all_realtime_quotes():
         })
         return df
     except Exception as e:
-        st.error(f"获取行情失败: {str(e)}")
-        return None
+        # 如果东方财富失败，尝试备用接口
+        try:
+            df = ak.stock_zh_a_spot()
+            df = df.rename(columns={
+                'code': 'code',
+                'name': 'name'
+            })
+            return df
+        except:
+            raise Exception(f"获取行情失败: {str(e)}")
 
 # 从全部行情中提取指定股票
 def get_stock_quote(stock_code, all_quotes):
@@ -56,11 +83,13 @@ def get_stock_quote(stock_code, all_quotes):
 
 # 缓存：获取历史数据用于均线计算
 @st.cache_data(ttl=300, show_spinner=False)
+@retry_on_failure(max_retries=3, delay=2)
 def get_stock_history(stock_code, days=30):
     """获取历史数据用于均线计算"""
     try:
         df = ak.stock_zh_a_hist(symbol=stock_code, period="daily", adjust="qfq")
-        df = df.tail(days)
+        if df is not None and len(df) > 0:
+            df = df.tail(days)
         return df
     except Exception as e:
         return None
@@ -123,12 +152,14 @@ with col2:
     auto_refresh = st.checkbox("自动刷新")
     if auto_refresh:
         refresh_interval = st.selectbox("刷新间隔", [30, 60, 120, 300], index=1, label_visibility="collapsed")
-        time.sleep(0.1)
-        st.rerun() if st.button("停止") else None
 
 # 批量获取所有行情
-with st.spinner("正在获取行情数据..."):
-    all_quotes = get_all_realtime_quotes()
+with st.spinner("正在获取行情数据（最多重试3次）..."):
+    try:
+        all_quotes = get_all_realtime_quotes()
+    except Exception as e:
+        all_quotes = None
+        st.error(f"获取行情失败，请稍后重试。错误: {str(e)}")
 
 # 显示每只股票的行情
 if all_quotes is not None:
@@ -146,8 +177,7 @@ if all_quotes is not None:
             with col1:
                 price = quote.get('price', 0)
                 change_pct = quote.get('change_pct', 0)
-                color = "green" if change_pct >= 0 else "red"
-                st.metric("最新价", f"¥{price}", f"{change_pct:+.2f}%")
+                st.metric("最新价", f"¥{price}", f"{change_pct:+.2f}%" if change_pct else None)
             
             with col2:
                 st.metric("今开", f"¥{quote.get('open', 0):.2f}")
@@ -171,8 +201,11 @@ if all_quotes is not None:
             # 均线系统
             st.markdown("**📈 均线系统**")
             with st.spinner("计算均线..."):
-                hist_df = get_stock_history(stock_code)
-                ma_dict = calculate_ma(hist_df)
+                try:
+                    hist_df = get_stock_history(stock_code)
+                    ma_dict = calculate_ma(hist_df)
+                except:
+                    ma_dict = {}
             
             if ma_dict:
                 ma_col1, ma_col2, ma_col3 = st.columns(3)
@@ -186,42 +219,43 @@ if all_quotes is not None:
             # 量价分析
             st.markdown("**📊 量价分析**")
             if ma_dict and price:
-                current_price = float(price)
-                ma5 = ma_dict.get('MA5', 0)
-                ma13 = ma_dict.get('MA13', 0)
-                ma20 = ma_dict.get('MA20', 0)
-                
-                analysis = []
-                if current_price > ma5 > ma13 > ma20:
-                    analysis.append("✅ 多头排列，趋势向上")
-                elif current_price < ma5 < ma13 < ma20:
-                    analysis.append("⚠️ 空头排列，趋势向下")
-                
-                if change_pct and float(change_pct) > 3:
-                    analysis.append("📈 大幅上涨")
-                elif change_pct and float(change_pct) < -3:
-                    analysis.append("📉 大幅下跌")
-                
-                if quote.get('turnover_rate', 0) > 10:
-                    analysis.append("🔥 换手活跃")
-                
-                if analysis:
-                    for item in analysis:
-                        st.info(item)
+                try:
+                    current_price = float(price)
+                    ma5 = ma_dict.get('MA5', 0)
+                    ma13 = ma_dict.get('MA13', 0)
+                    ma20 = ma_dict.get('MA20', 0)
+                    
+                    analysis = []
+                    if current_price > ma5 > ma13 > ma20:
+                        analysis.append("✅ 多头排列，趋势向上")
+                    elif current_price < ma5 < ma13 < ma20:
+                        analysis.append("⚠️ 空头排列，趋势向下")
+                    
+                    if change_pct and float(change_pct) > 3:
+                        analysis.append("📈 大幅上涨")
+                    elif change_pct and float(change_pct) < -3:
+                        analysis.append("📉 大幅下跌")
+                    
+                    if quote.get('turnover_rate', 0) > 10:
+                        analysis.append("🔥 换手活跃")
+                    
+                    if analysis:
+                        for item in analysis:
+                            st.info(item)
+                except:
+                    pass
             
             st.markdown("---")
         else:
             st.warning(f"股票 {stock_code} 未找到")
-else:
-    st.error("获取行情数据失败，请稍后重试")
 
 # 页脚
 st.markdown("---")
 st.caption(f"数据来源: 东方财富 | 最后更新: {datetime.now().strftime('%H:%M:%S')}")
 st.caption("⚠️ 免责声明: 本工具仅供学习交流，不构成投资建议")
+st.caption("💡 提示: 如遇网络错误，请点击刷新重试（已内置3次自动重试）")
 
 # 自动刷新逻辑
 if auto_refresh:
-    import time
     time.sleep(refresh_interval)
     st.rerun()
