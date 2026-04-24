@@ -1,14 +1,14 @@
-[theme]
-primaryColor = "#FF4B4B"
-backgroundColor = "#0E1117"
-secondaryBackgroundColor = "#1A1A2E"
-textColor = "#FAFAFA"
-font = "sans serif"
+[主题]
+主要颜色 = "#FF4B4B" = "#FF4B4B"
+backgroundColor = "#0E1117" = "#0E1117"
+次要背景颜色 = "#1A1A2E" = "#1A1A2E"
+textColor = "#FAFAFA" = "#FAFAFA"
+字体 = "无衬线" = "sans serif"
 
-[server]
-port = 8501
-headless = true
-runOnSave = true
+[服务器]
+端口 = 8501 = 8501
+无头 = 真 = true
+运行于保存 = 真 = true
 
-[browser]
-gatherUsageStats = false
+[浏览器]
+收集使用统计信息 = 真 = true
