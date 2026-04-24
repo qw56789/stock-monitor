@@ -1,274 +1,227 @@
-"""
-股票盯盘工具 - Streamlit版
-================================================================================
-功能：
-- 实时行情监控
-- 均线系统（5日、13日、20日）
-- 成交量监控
-- 自选股管理
-- 自动刷新
-
-使用方法：
-1. 安装依赖：pip install streamlit akshare pandas
-2. 运行：streamlit run app.py
-3. 浏览器打开 http://localhost:8501
-
-作者：xu qing
-日期：2026年4月24日
-================================================================================
-"""
-
 import streamlit as st
 import akshare as ak
 import pandas as pd
-import time
 from datetime import datetime, timedelta
+import time
 
-# ============================================================================
 # 页面配置
-# ============================================================================
 st.set_page_config(
-    page_title="徐老板盯盘助手",
+    page_title="徐老板盯盘",
     page_icon="📈",
-    layout="wide",
-    initial_sidebar_state="expanded"
+    layout="wide"
 )
 
-# ============================================================================
-# 数据获取函数
-# ============================================================================
-@st.cache_data(ttl=60)
-def get_realtime_quote(stock_code):
-    """
-    获取实时行情
-    """
+# 标题
+st.title("📈 徐老板盯盘")
+st.markdown("---")
+
+# 缓存：获取所有A股实时行情（5分钟缓存）
+@st.cache_data(ttl=300, show_spinner=False)
+def get_all_realtime_quotes():
+    """批量获取所有A股实时行情（东方财富数据源，速度更快）"""
     try:
-        # 判断市场
-        if stock_code.startswith('6'):
-            symbol = f"sh{stock_code}"
-        else:
-            symbol = f"sz{stock_code}"
-        
-        # 获取实时行情
+        # 使用东方财富接口，一次获取所有股票行情
         df = ak.stock_zh_a_spot_em()
-        stock_data = df[df['代码'] == stock_code]
-        
-        if len(stock_data) == 0:
-            return None
-        
-        row = stock_data.iloc[0]
-        
-        return {
-==============================================================================='""': row['代码'],
-            'name': row['名称'],
-            'price': float(row['最新价']),
-            'change_pct': float(row['涨跌幅']),
-            'change': float(row['涨跌额']),
-            'open': float(row['今开']),
-            'high': float(row['最高']),
-            'low': float(row['最低']),
-            'volume': float(row['成交量']),
-            'amount': float(row['成交额']),
-            'volume_ratio': float(row.get('量比', 0)),
-            'turnover_rate': float(row.get('换手率', 0)),
-        }
-    except Exception as e:
-        st.error(f"获取行情失败: {e}")
-        return None
-
-
-@st.cache_data(ttl=300)
-def get_stock_history(stock_code, days=30):
-    """
-    获取历史数据（用于计算均线）
-    """
-    try:
-        # 判断市场
-        if stock_code.startswith('6'):
-            symbol = f"sh{stock_code}"
-        else:
-            symbol = f"sz{stock_code}"
-        
-        # 获取历史数据
-        end_date = datetime.now().strftime('%Y%m%d')
-        start_date = (datetime.now() - timedelta(days=days*2)).strftime('%Y%m%d')
-        
-        df = ak.stock_zh_a_hist(
-            symbol=stock_code,
-            period="daily",
-            start_date=start_date,
-            end_date=end_date,
-            adjust="qfq"
-        )
-        
-        if df is None or len(df) == 0:
-            return None
-        
+        # 重命名列
+        df = df.rename(columns={
+            '代码': 'code',
+            '名称': 'name',
+            '最新价': 'price',
+            '涨跌幅': 'change_pct',
+            '涨跌额': 'change',
+            '成交量': 'volume',
+            '成交额': 'amount',
+            '最高': 'high',
+            '最低': 'low',
+            '今开': 'open',
+            '昨收': 'pre_close',
+            '换手率': 'turnover_rate',
+            '市盈率-动态': 'pe',
+            '市净率': 'pb'
+        })
         return df
     except Exception as e:
-        st.error(f"获取历史数据失败: {e}")
+        st.error(f"获取行情失败: {str(e)}")
         return None
 
+# 从全部行情中提取指定股票
+def get_stock_quote(stock_code, all_quotes):
+    """从全部行情中提取指定股票"""
+    if all_quotes is None:
+        return None
+    stock_data = all_quotes[all_quotes['code'] == stock_code]
+    if stock_data.empty:
+        return None
+    return stock_data.iloc[0].to_dict()
 
-def calculate_ma(df, periods=[5, 13, 20]):
-    """
-    计算均线
-    """
-    if df is None or len(df) == 0:
+# 缓存：获取历史数据用于均线计算
+@st.cache_data(ttl=300, show_spinner=False)
+def get_stock_history(stock_code, days=30):
+    """获取历史数据用于均线计算"""
+    try:
+        df = ak.stock_zh_a_hist(symbol=stock_code, period="daily", adjust="qfq")
+        df = df.tail(days)
+        return df
+    except Exception as e:
+        return None
+
+# 计算均线
+def calculate_ma(hist_df, periods=[5, 13, 20]):
+    """计算均线"""
+    if hist_df is None or len(hist_df) < max(periods):
         return {}
     
-    ma_values = {}
+    ma_dict = {}
     for period in periods:
-        if len(df) >= period:
-            ma_values[f'MA{period}'] = df['收盘'].tail(period).mean()
-        else:
-            ma_values[f'MA{period}'] = df['收盘'].mean()
-    
-    return ma_values
+        if len(hist_df) >= period:
+            ma_dict[f'MA{period}'] = round(hist_df['收盘'].tail(period).mean(), 2)
+    return ma_dict
 
+# 初始化自选股列表
+if 'watchlist' not in st.session_state:
+    st.session_state.watchlist = ['600559', '000001']  # 默认：老白干酒、平安银行
 
-def get_volume_info(df):
-    """
-    获取成交量信息
-    """
-    if df is None or len(df) == 0:
-        return None
+# 侧边栏：自选股管理
+with st.sidebar:
+    st.header("📝 自选股管理")
     
-    today_volume = df['成交量'].iloc[-1] if len(df) > 0 else 0
-    avg_volume_30 = df['成交量'].tail(30).mean() if len(df) >= 30 else df['成交量'].mean()
-    max_volume_30 = df['成交量'].tail(30).max() if len(df) >= 30 else df['成交量'].max()
-    
-    return {
-        'today_volume': today_volume,
-        'avg_volume_30': avg_volume_30,
-        'max_volume_30': max_volume_30,
-        'volume_ratio': today_volume / avg_volume_30 if avg_volume_30 > 0 else 0
-    }
-
-
-# ============================================================================
-# 主应用
-# ============================================================================
-def main():
-    st.title("📈 徐老板盯盘助手")
-    st.markdown("---")
-    
-    # 侧边栏：自选股管理
-    with st.sidebar:
-        st.header("📝 自选股管理")
-        
-        # 初始化session state
-        if 'watchlist' not in st.session_state:
-            st.session_state.watchlist = ['600519', '000001', '300750']
-        
-        # 添加股票
-        new_stock = st.text_input("添加股票代码", placeholder="如：600519")
-        if st.button("添加"):
-            if new_stock and new_stock not in st.session_state.watchlist:
+    # 添加股票
+    new_stock = st.text_input("添加股票代码", placeholder="如: 600519")
+    if st.button("添加"):
+        if new_stock and len(new_stock) == 6 and new_stock.isdigit():
+            if new_stock not in st.session_state.watchlist:
                 st.session_state.watchlist.append(new_stock)
                 st.success(f"已添加 {new_stock}")
                 st.rerun()
-        
-        # 显示自选股列表
-        st.subheader("当前自选股")
-        for i, code in enumerate(st.session_state.watchlist):
-            col1, col2 = st.columns([3, 1])
-            with col1:
-                st.text(code)
-            with col2:
-                if st.button("删除", key=f"del_{i}"):
-                    st.session_state.watchlist.remove(code)
-                    st.rerun()
-        
-        st.markdown("---")
-        
-        # 刷新设置
-        st.subheader("⚙️ 设置")
-        auto_refresh = st.checkbox("自动刷新", value=True)
-        refresh_interval = st.slider("刷新间隔(秒)", 5, 60, 30)
+            else:
+                st.warning("该股票已在自选列表中")
+        else:
+            st.error("请输入正确的6位股票代码")
     
-    # 主内容区
-    st.header("📊 实时行情")
-    
-    # 手动刷新按钮
-    col1, col2, col3 = st.columns([1, 1, 4])
-    with col1:
-        if st.button("🔄 刷新数据"):
-            st.cache_data.clear()
-            st.rerun()
-    with col2:
-        st.caption(f"最后更新: {datetime.now().strftime('%H:%M:%S')}")
-    
-    # 显示股票数据
+    # 显示自选股列表
+    st.markdown("---")
+    st.subheader("当前自选股")
+    for stock in st.session_state.watchlist[:]:
+        col1, col2 = st.columns([3, 1])
+        with col1:
+            st.text(stock)
+        with col2:
+            if st.button("删除", key=f"del_{stock}"):
+                st.session_state.watchlist.remove(stock)
+                st.rerun()
+
+# 主区域：实时行情
+st.header("📊 实时行情")
+
+# 刷新按钮
+col1, col2, col3 = st.columns([1, 1, 4])
+with col1:
+    if st.button("🔄 刷新数据", type="primary"):
+        st.cache_data.clear()
+        st.rerun()
+with col2:
+    auto_refresh = st.checkbox("自动刷新")
+    if auto_refresh:
+        refresh_interval = st.selectbox("刷新间隔", [30, 60, 120, 300], index=1, label_visibility="collapsed")
+        time.sleep(0.1)
+        st.rerun() if st.button("停止") else None
+
+# 批量获取所有行情
+with st.spinner("正在获取行情数据..."):
+    all_quotes = get_all_realtime_quotes()
+
+# 显示每只股票的行情
+if all_quotes is not None:
     for stock_code in st.session_state.watchlist:
-        with st.container():
-            # 获取数据
-            quote = get_realtime_quote(stock_code)
-            history = get_stock_history(stock_code, days=30)
-            ma_values = calculate_ma(history) if history is not None else {}
-            volume_info = get_volume_info(history) if history is not None else None
+        quote = get_stock_quote(stock_code, all_quotes)
+        
+        if quote:
+            # 股票名称和代码
+            stock_name = quote.get('name', '未知')
+            st.subheader(f"{stock_name} ({stock_code})")
             
-            if quote is None:
-                st.warning(f"无法获取 {stock_code} 的数据")
-                continue
-            
-            # 股票卡片
-            change_color = "green" if quote['change_pct'] >= 0 else "red"
-            
-            st.markdown(f"""
-            <div style='background-color: #1a1a2e; padding: 20px; border-radius: 10px; margin-bottom: 10px; border-left: 5px solid {change_color};'>
-                <h2 style='color: white; margin: 0;'>{quote['name']} <span style='font-size: 0.7em; color: #888;'>({quote['code']})</span></h2>
-                <div style='margin-top: 10px;'>
-                    <span style='font-size: 2.5em; font-weight: bold; color: {change_color};'>{quote['price']:.2f}</span>
-                    <span style='font-size: 1.2em; color: {change_color}; margin-left: 10px;'>{quote['change_pct']:+.2f}%</span>
-                    <span style='font-size: 1em; color: {change_color}; margin-left: 5px;'>({quote['change']:+.2f})</span>
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
-            
-            # 详细数据
+            # 行情数据
             col1, col2, col3, col4 = st.columns(4)
             
             with col1:
-                st.metric("开盘价", f"{quote['open']:.2f}")
-                st.metric("最高价", f"{quote['high']:.2f}")
-                st.metric("最低价", f"{quote['low']:.2f}")
+                price = quote.get('price', 0)
+                change_pct = quote.get('change_pct', 0)
+                color = "green" if change_pct >= 0 else "red"
+                st.metric("最新价", f"¥{price}", f"{change_pct:+.2f}%")
             
             with col2:
-                st.metric("MA5", f"{ma_values.get('MA5', 0):.2f}")
-                st.metric("MA13", f"{ma_values.get('MA13', 0):.2f}")
-                st.metric("MA20", f"{ma_values.get('MA20', 0):.2f}")
+                st.metric("今开", f"¥{quote.get('open', 0):.2f}")
+                st.metric("昨收", f"¥{quote.get('pre_close', 0):.2f}")
             
             with col3:
-                if volume_info:
-                    vol_ratio = volume_info['volume_ratio']
-                    st.metric("成交量", f"{volume_info['today_volume']/10000:.0f}万手")
-                    st.metric("量比", f"{vol_ratio:.2f}")
-                    st.metric("换手率", f"{quote['turnover_rate']:.2f}%")
+                st.metric("最高", f"¥{quote.get('high', 0):.2f}")
+                st.metric("最低", f"¥{quote.get('low', 0):.2f}")
             
             with col4:
-                if volume_info:
-                    st.metric("30日均量", f"{volume_info['avg_volume_30']/10000:.0f}万手")
-                    st.metric("30日高量", f"{volume_info['max_volume_30']/10000:.0f}万手")
-                    
-                    # 量价关系判断
-                    current_price = quote['price']
-                    ma5 = ma_values.get('MA5', 0)
-                    
-                    if current_price > ma5 and vol_ratio > 1.5:
-                        st.success("放量上涨 ✅")
-                    elif current_price < ma5 and vol_ratio > 1.5:
-                        st.error("放量下跌 ⚠️")
-                    elif vol_ratio < 0.5:
-                        st.info("缩量 📉")
+                volume = quote.get('volume', 0)
+                if volume > 100000000:
+                    volume_str = f"{volume/100000000:.2f}亿"
+                elif volume > 10000:
+                    volume_str = f"{volume/10000:.2f}万"
+                else:
+                    volume_str = f"{volume}"
+                st.metric("成交量", volume_str)
+                st.metric("换手率", f"{quote.get('turnover_rate', 0):.2f}%")
+            
+            # 均线系统
+            st.markdown("**📈 均线系统**")
+            with st.spinner("计算均线..."):
+                hist_df = get_stock_history(stock_code)
+                ma_dict = calculate_ma(hist_df)
+            
+            if ma_dict:
+                ma_col1, ma_col2, ma_col3 = st.columns(3)
+                with ma_col1:
+                    st.metric("MA5", f"¥{ma_dict.get('MA5', '-')}")
+                with ma_col2:
+                    st.metric("MA13", f"¥{ma_dict.get('MA13', '-')}")
+                with ma_col3:
+                    st.metric("MA20", f"¥{ma_dict.get('MA20', '-')}")
+            
+            # 量价分析
+            st.markdown("**📊 量价分析**")
+            if ma_dict and price:
+                current_price = float(price)
+                ma5 = ma_dict.get('MA5', 0)
+                ma13 = ma_dict.get('MA13', 0)
+                ma20 = ma_dict.get('MA20', 0)
+                
+                analysis = []
+                if current_price > ma5 > ma13 > ma20:
+                    analysis.append("✅ 多头排列，趋势向上")
+                elif current_price < ma5 < ma13 < ma20:
+                    analysis.append("⚠️ 空头排列，趋势向下")
+                
+                if change_pct and float(change_pct) > 3:
+                    analysis.append("📈 大幅上涨")
+                elif change_pct and float(change_pct) < -3:
+                    analysis.append("📉 大幅下跌")
+                
+                if quote.get('turnover_rate', 0) > 10:
+                    analysis.append("🔥 换手活跃")
+                
+                if analysis:
+                    for item in analysis:
+                        st.info(item)
             
             st.markdown("---")
-    
-    # 自动刷新
-    if auto_refresh:
-        time.sleep(refresh_interval)
-        st.rerun()
+        else:
+            st.warning(f"股票 {stock_code} 未找到")
+else:
+    st.error("获取行情数据失败，请稍后重试")
 
+# 页脚
+st.markdown("---")
+st.caption(f"数据来源: 东方财富 | 最后更新: {datetime.now().strftime('%H:%M:%S')}")
+st.caption("⚠️ 免责声明: 本工具仅供学习交流，不构成投资建议")
 
-if __name__ == "__main__":
-    main()
+# 自动刷新逻辑
+if auto_refresh:
+    import time
+    time.sleep(refresh_interval)
+    st.rerun()
