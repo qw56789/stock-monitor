@@ -13,7 +13,7 @@
 2. 运行：streamlit run app.py
 3. 浏览器打开 http://localhost:8501
 
-作者：扣子
+作者：xu qing
 日期：2026年4月24日
 ================================================================================
 """
@@ -28,7 +28,7 @@ from datetime import datetime, timedelta
 # 页面配置
 # ============================================================================
 st.set_page_config(
-    page_title="股票盯盘助手",
+    page_title="徐老板盯盘助手",
     page_icon="📈",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -59,7 +59,7 @@ def get_realtime_quote(stock_code):
         row = stock_data.iloc[0]
         
         return {
-            'code': row['代码'],
+==============================================================================='""': row['代码'],
             'name': row['名称'],
             'price': float(row['最新价']),
             'change_pct': float(row['涨跌幅']),
@@ -150,7 +150,7 @@ def get_volume_info(df):
 # 主应用
 # ============================================================================
 def main():
-    st.title("📈 股票盯盘助手")
+    st.title("📈 徐老板盯盘助手")
     st.markdown("---")
     
     # 侧边栏：自选股管理
