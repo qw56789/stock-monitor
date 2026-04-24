@@ -1,11 +1,11 @@
 import streamlit as st
-import akshare as ak
 import pandas as pd
 import numpy as np
-from datetime import datetime, timedelta
+from datetime import datetime
 import time
 import warnings
-import json
+import requests
+import re
 warnings.filterwarnings('ignore')
 
 # 额外依赖：plotly用于交互式K线图
@@ -18,14 +18,14 @@ except:
 
 # 页面配置
 st.set_page_config(
-    page_title="溪城游资 Pro",
+    page_title="股票盯盘助手",
     page_icon="📈",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
 # 标题
-st.title("📈 溪城游资 Pro")
+st.title("📈 股票盯盘助手")
 st.markdown("---")
 
 # 初始化session state
@@ -33,7 +33,150 @@ if 'watchlist' not in st.session_state:
     st.session_state.watchlist = ['600559', '000001']
 
 if 'alerts' not in st.session_state:
-    st.session_state.alerts = {}  # {股票代码: {'price': 价格, 'type': 'above/below'}}
+    st.session_state.alerts = {}
+
+# ========== 新浪财经数据接口 ==========
+class SinaStockAPI:
+    """新浪财经数据接口"""
+    
+    BASE_URL = "https://hq.sinajs.cn"
+    
+    @staticmethod
+    def get_realtime_quotes(codes):
+        """
+        获取实时行情（新浪接口）
+        codes: 股票代码列表，如 ['600559', '000001']
+        """
+        # 构建请求URL
+        # 上海股票加sh前缀，深圳股票加sz前缀
+        code_list = []
+        for code in codes:
+            if code.startswith('6'):
+                code_list.append(f"sh{code}")
+            else:
+                code_list.append(f"sz{code}")
+        
+        url = f"{SinaStockAPI.BASE_URL}/list={''.join(code_list)}"
+        
+        try:
+            headers = {
+                'Referer': 'https://finance.sina.com.cn',
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            }
+            response = requests.get(url, headers=headers, timeout=10)
+            response.encoding = 'gbk'
+            
+            result = {}
+            lines = response.text.strip().split('\n')
+            
+            for line in lines:
+                # 解析：var hq_str_sh600559="老白干酒,13.50,13.20,..."
+                match = re.match(r'var hq_str_(sh|sz)(\d+)="(.*)"', line)
+                if match:
+                    prefix = match.group(1)
+                    code = match.group(2)
+                    data = match.group(3).split(',')
+                    
+                    if len(data) >= 32:
+                        result[code] = {
+                            'code': code,
+                            'name': data[0],
+                            'open': float(data[1]) if data[1] else 0,
+                            'prev_close': float(data[2]) if data[2] else 0,
+                            'price': float(data[3]) if data[3] else 0,
+                            'high': float(data[4]) if data[4] else 0,
+                            'low': float(data[5]) if data[5] else 0,
+                            'volume': float(data[8]) if data[8] else 0,
+                            'amount': float(data[9]) if data[9] else 0,
+                            'change': float(data[3]) - float(data[2]) if data[2] and data[3] else 0,
+                            'change_pct': (float(data[3]) - float(data[2])) / float(data[2]) * 100 if data[2] and data[3] and float(data[2]) > 0 else 0,
+                        }
+            
+            return result
+        except Exception as e:
+            print(f"新浪接口错误: {e}")
+            return {}
+    
+    @staticmethod
+    def get_history_data(code, days=60):
+        """
+        获取历史K线数据
+        使用新浪历史数据接口
+        """
+        try:
+            # 新浪历史数据接口
+            if code.startswith('6'):
+                symbol = f"sh{code}"
+            else:
+                symbol = f"sz{code}"
+            
+            url = f"https://quotes.sina.cn/cn/api/json_v2.php/CN_MarketDataService.getKLineData"
+            params = {
+                'symbol': symbol,
+                'scale': '240',  # 日线
+                'ma': 'no',
+                'datalen': days
+            }
+            
+            headers = {
+                'Referer': 'https://finance.sina.com.cn',
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            }
+            
+            response = requests.get(url, params=params, headers=headers, timeout=10)
+            data = response.json()
+            
+            if data and isinstance(data, list):
+                df = pd.DataFrame(data)
+                df = df.rename(columns={
+                    'day': '日期',
+                    'open': '开盘',
+                    'high': '最高',
+                    'low': '最低',
+                    'close': '收盘',
+                    'volume': '成交量'
+                })
+                # 转换数据类型
+                for col in ['开盘', '最高', '最低', '收盘', '成交量']:
+                    df[col] = pd.to_numeric(df[col], errors='coerce')
+                return df
+        except Exception as e:
+            print(f"获取历史数据失败: {e}")
+        
+        # 如果新浪接口失败，尝试备用方案
+        return SinaStockAPI._get_history_backup(code, days)
+    
+    @staticmethod
+    def _get_history_backup(code, days=60):
+        """备用：使用腾讯财经接口"""
+        try:
+            url = "https://web.ifzq.gtimg.cn/appstock/app/fqkline/get"
+            params = {
+                '_var': 'kline_dayqfq',
+                'param': f"{'sh' if code.startswith('6') else 'sz'}{code},day,,,{days},qfq",
+                'r': int(time.time())
+            }
+            
+            response = requests.get(url, params=params, timeout=10)
+            json_data = response.json()
+            
+            if json_data and 'data' in json_data:
+                stock_data = json_data['data'].get(f"{'sh' if code.startswith('6') else 'sz'}{code}", {})
+                kline_data = stock_data.get('day', [])
+                
+                if kline_data:
+                    df = pd.DataFrame(kline_data, columns=['日期', '开盘', '收盘', '最高', '最低', '成交量', ''])
+                    df = df[['日期', '开盘', '收盘', '最高', '最低', '成交量']]
+                    for col in ['开盘', '收盘', '最高', '最低', '成交量']:
+                        df[col] = pd.to_numeric(df[col], errors='coerce')
+                    return df
+        except Exception as e:
+            print(f"备用接口也失败: {e}")
+        
+        return None
+
+# 创建API实例
+sina_api = SinaStockAPI()
 
 # ========== 技术指标计算函数 ==========
 def calculate_ma(close, periods=[5, 10, 20, 60]):
@@ -146,7 +289,6 @@ def plot_kline(df, stock_code, stock_name, show_macd=True, show_kdj=True, show_r
     # RSI
     if show_rsi:
         fig.add_trace(go.Scatter(x=df.index, y=rsi, name='RSI', line=dict(color='white')), row=current_row, col=1)
-        # 超买超卖线
         fig.add_hline(y=80, line_dash="dash", line_color="red", row=current_row, col=1)
         fig.add_hline(y=20, line_dash="dash", line_color="green", row=current_row, col=1)
     
@@ -197,7 +339,6 @@ with tab1:
         
         st.markdown("---")
         st.header("📊 K线设置")
-        period_select = st.selectbox("时间周期", ["日线", "60分钟", "30分钟", "15分钟", "5分钟"], index=0)
         days_select = st.slider("显示天数", 30, 120, 60)
         
         st.markdown("---")
@@ -207,7 +348,7 @@ with tab1:
         show_rsi = st.checkbox("RSI", value=True)
 
     # 主区域
-    st.header("📊 实时行情 + K线分析")
+    st.header("📊 实时行情 + K线分析（新浪数据源）")
 
     # 选择股票查看详情
     selected_stock = st.selectbox("选择股票查看K线", st.session_state.watchlist)
@@ -217,71 +358,41 @@ with tab1:
         st.cache_data.clear()
         st.rerun()
 
-    # 获取数据
+    # 获取数据（使用新浪接口）
+    @st.cache_data(ttl=60)
+    def get_quotes(codes):
+        return sina_api.get_realtime_quotes(codes)
+    
     @st.cache_data(ttl=300)
-    def get_all_stocks():
-        try:
-            df = ak.stock_zh_a_spot_em()
-            return df
-        except Exception as e:
-            return None
+    def get_history(code, days=60):
+        return sina_api.get_history_data(code, days)
 
-    @st.cache_data(ttl=300)
-    def get_stock_history(stock_code, period="daily", days=60):
-        """获取历史数据"""
-        try:
-            if period == "日线":
-                df = ak.stock_zh_a_hist(symbol=stock_code, period="daily", adjust="qfq")
-            else:
-                # 分钟线
-                period_map = {"60分钟": "60", "30分钟": "30", "15分钟": "15", "5分钟": "5"}
-                df = ak.stock_zh_a_hist_min_em(symbol=stock_code, period=period_map.get(period, "60"), adjust="qfq")
-            
-            if df is not None and len(df) > 0:
-                df = df.tail(days)
-            return df
-        except Exception as e:
-            return None
+    with st.spinner("正在获取数据（新浪接口）..."):
+        quotes = get_quotes(st.session_state.watchlist)
+        hist_df = get_history(selected_stock, days_select)
 
-    with st.spinner("正在获取数据..."):
-        df = get_all_stocks()
-
-    if df is not None and not df.empty:
-        code_col = '代码' if '代码' in df.columns else 'code'
-        name_col = '名称' if '名称' in df.columns else 'name'
-        
+    if quotes:
         # 获取选中股票信息
-        stock_data = df[df[code_col].astype(str) == selected_stock]
-        
-        if not stock_data.empty:
-            row = stock_data.iloc[0]
-            stock_name = str(row[name_col])
+        if selected_stock in quotes:
+            quote = quotes[selected_stock]
             
             # 实时行情卡片
             col1, col2, col3, col4, col5 = st.columns(5)
             
-            price_col = '最新价' if '最新价' in df.columns else 'price'
-            pct_col = '涨跌幅' if '涨跌幅' in df.columns else 'change_pct'
-            high_col = '最高' if '最高' in df.columns else 'high'
-            low_col = '最低' if '最低' in df.columns else 'low'
-            open_col = '今开' if '今开' in df.columns else 'open'
-            
             with col1:
-                st.metric("最新价", f"¥{row[price_col]}")
+                st.metric("最新价", f"¥{quote['price']}")
             with col2:
-                st.metric("涨跌幅", f"{row[pct_col]}%")
+                st.metric("涨跌幅", f"{quote['change_pct']:.2f}%")
             with col3:
-                st.metric("今开", f"¥{row[open_col]}")
+                st.metric("今开", f"¥{quote['open']}")
             with col4:
-                st.metric("最高", f"¥{row[high_col]}")
+                st.metric("最高", f"¥{quote['high']}")
             with col5:
-                st.metric("最低", f"¥{row[low_col]}")
+                st.metric("最低", f"¥{quote['low']}")
             
             st.markdown("---")
             
             # K线图
-            hist_df = get_stock_history(selected_stock, period_select, days_select)
-            
             if hist_df is not None and not hist_df.empty:
                 # 计算技术指标数值显示
                 close = hist_df['收盘'].values
@@ -302,7 +413,7 @@ with tab1:
                     st.metric("RSI(14)", f"{rsi[-1]:.1f}")
                 
                 # 绘制K线图
-                fig = plot_kline(hist_df, selected_stock, stock_name, show_macd, show_kdj, show_rsi)
+                fig = plot_kline(hist_df, selected_stock, quote['name'], show_macd, show_kdj, show_rsi)
                 if fig:
                     st.plotly_chart(fig, use_container_width=True)
                 
@@ -318,7 +429,7 @@ with tab1:
         st.error("获取数据失败，请刷新重试")
     
     st.markdown("---")
-    st.caption(f"数据来源: 东方财富 | 更新时间: {datetime.now().strftime('%H:%M:%S')}")
+    st.caption(f"数据来源: 新浪财经 | 更新时间: {datetime.now().strftime('%H:%M:%S')}")
 
 # ========== Tab2: 多因子选股 ==========
 with tab2:
@@ -341,112 +452,13 @@ with tab2:
             max_results = st.slider("最多显示结果数", 10, 100, 30)
     
     if st.button("🚀 开始选股", type="primary"):
-        with st.spinner("正在筛选..."):
-            try:
-                all_stocks = ak.stock_zh_a_spot_em()
-                code_col = '代码' if '代码' in all_stocks.columns else 'code'
-                name_col = '名称' if '名称' in all_stocks.columns else 'name'
-                pct_col = '涨跌幅' if '涨跌幅' in all_stocks.columns else 'change_pct'
-                price_col = '最新价' if '最新价' in all_stocks.columns else 'price'
-                open_col = '今开' if '今开' in all_stocks.columns else 'open'
-                
-                all_stocks[code_col] = all_stocks[code_col].astype(str)
-                main_board = all_stocks[all_stocks[code_col].str.match(r'^(60|00)')]
-                main_board = main_board[~main_board[name_col].str.contains('ST|退市', case=False, na=False)]
-                main_board = main_board[pd.to_numeric(main_board[pct_col], errors='coerce') >= min_rise]
-                
-                st.info(f"初步筛选: {len(main_board)} 只股票")
-                
-                results = []
-                progress_bar = st.progress(0)
-                
-                for idx, (_, row) in enumerate(main_board.iterrows()):
-                    if idx >= 150:
-                        break
-                    
-                    progress_bar.progress((idx + 1) / 150)
-                    
-                    try:
-                        stock_code = str(row[code_col])
-                        stock_name = str(row[name_col])
-                        
-                        hist = ak.stock_zh_a_hist(symbol=stock_code, period="daily", adjust="qfq")
-                        if hist is None or len(hist) < 60:
-                            continue
-                        
-                        hist = hist.tail(60)
-                        close = hist['收盘'].values
-                        high = hist['最高'].values
-                        low = hist['最低'].values
-                        volume = hist['成交量'].values
-                        
-                        current_price = float(row[price_col])
-                        rise_pct = float(row[pct_col])
-                        open_price = float(row[open_col])
-                        high_30d = max(high[-30:])
-                        
-                        ma3 = round(np.mean(close[-3:]), 2)
-                        ma5 = round(np.mean(close[-5:]), 2)
-                        ma13 = round(np.mean(close[-13:]), 2)
-                        ma20 = round(np.mean(close[-20:]), 2)
-                        ma60 = round(np.mean(close[-60:]), 2)
-                        
-                        reversal = close[-1] > close[-2] > close[-3]
-                        
-                        # 因子计算
-                        factor_count = 0
-                        factor_count += 1 if ma5 > ma10 else 0
-                        factor_count += 1 if ma20 > ma60 else 0
-                        
-                        # KDJ
-                        k, d, j = calculate_kdj(high, low, close)
-                        factor_count += 1 if j[-1] > k[-1] else 0
-                        
-                        # MACD
-                        dif, dea, macd = calculate_macd(close)
-                        factor_count += 1 if dif[-1] > dea[-1] else 0
-                        factor_count += 1 if macd[-1] > 0 else 0
-                        
-                        # 量
-                        vol_ma60 = np.mean(volume[-60:])
-                        factor_count += 1 if volume[-1] > vol_ma60 else 0
-                        factor_count += 1 if rise_pct > 3 else 0
-                        
-                        is_yang = current_price > open_price
-                        is_strong = rise_pct > 5 and is_yang
-                        
-                        if factor_count >= min_factor_count and reversal:
-                            if not require_strong or is_strong:
-                                results.append({
-                                    '代码': stock_code,
-                                    '名称': stock_name,
-                                    '当前价': current_price,
-                                    '涨幅%': rise_pct,
-                                    'MA3': ma3,
-                                    'MA5': ma5,
-                                    'MA13': ma13,
-                                    'MA20': ma20,
-                                    '因子数': factor_count,
-                                    '反转': '✅' if reversal else '❌',
-                                    '强势': '✅' if is_strong else '❌'
-                                })
-                    except:
-                        continue
-                
-                progress_bar.empty()
-                
-                if results:
-                    result_df = pd.DataFrame(results).sort_values('因子数', ascending=False).head(max_results)
-                    st.success(f"🎯 筛选出 {len(result_df)} 只股票")
-                    st.dataframe(result_df, use_container_width=True, hide_index=True)
-                    
-                    csv = result_df.to_csv(index=False).encode('utf-8-sig')
-                    st.download_button("📥 下载CSV", csv, f"选股结果_{datetime.now().strftime('%Y%m%d')}.csv", "text/csv")
-                else:
-                    st.warning("未找到符合条件的股票")
-                    
-            except Exception as e:
-                st.error(f"选股出错: {str(e)}")
+        st.info("选股功能需要获取全市场数据，新浪接口暂时不支持，建议使用本地运行版本")
+        st.code("""
+# 选股功能建议：
+# 1. 本地运行此程序，使用 akshare 库
+# 2. 或使用其他支持全市场数据的接口
+# 3. 新浪接口仅支持实时行情查询
+        """)
 
 # ========== Tab3: 价格预警 ==========
 with tab3:
@@ -475,7 +487,7 @@ with tab3:
                     'price': alert_price,
                     'type': 'above' if alert_type == "突破上方" else 'below'
                 }
-                st.success(f"已添加预警: {alert_stock} {'突破' if alert_type == '突破上方' else '跌破'} {alert_price}")
+                st.success(f"已添加预警: {alert_stock}")
                 st.rerun()
     
     # 显示预警列表
@@ -501,15 +513,12 @@ with tab3:
         if st.button("🔍 检查预警状态", type="primary"):
             with st.spinner("正在检查..."):
                 try:
-                    all_stocks = ak.stock_zh_a_spot_em()
-                    code_col = '代码' if '代码' in all_stocks.columns else 'code'
-                    price_col = '最新价' if '最新价' in all_stocks.columns else 'price'
+                    quotes = sina_api.get_realtime_quotes(list(st.session_state.alerts.keys()))
                     
                     triggered = []
                     for stock, info in st.session_state.alerts.items():
-                        stock_data = all_stocks[all_stocks[code_col].astype(str) == stock]
-                        if not stock_data.empty:
-                            current_price = float(stock_data.iloc[0][price_col])
+                        if stock in quotes:
+                            current_price = quotes[stock]['price']
                             target_price = info['price']
                             
                             if info['type'] == 'above' and current_price >= target_price:
@@ -527,11 +536,7 @@ with tab3:
                     st.error(f"检查失败: {str(e)}")
     else:
         st.info("暂无预警设置，请添加股票预警")
-    
-    # 持久化说明
-    st.markdown("---")
-    st.caption("💡 提示: 预警数据保存在浏览器会话中，刷新页面后会重置。云端持久化需配置数据库。")
 
 # ========== 页脚 ==========
 st.markdown("---")
-st.caption("📈 股票盯盘助手 Pro | 数据来源: 东方财富 | ⚠️ 仅供学习参考，不构成投资建议")
+st.caption("📈 股票盯盘助手 | 数据来源: 新浪财经 | ⚠️ 仅供学习参考，不构成投资建议")
