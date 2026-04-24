@@ -2,13 +2,13 @@
 主要颜色 = "#FF4B4B" = "#FF4B4B"
 backgroundColor = "#0E1117" = "#0E1117"
 次要背景颜色 = "#1A1A2E" = "#1A1A2E"
-textColor = "#FAFAFA" = "#FAFAFA"
-字体 = "无衬线" = "sans serif"
+文本颜色 = "#FAFAFA" = "#FAFAFA"
+字体 = "无衬线" = "无衬线字体"
 
 [服务器]
 端口 = 8501 = 8501
-无头 = 真 = true
-运行于保存 = 真 = true
+无头 = 真 = 真
+运行于保存 = 真 = 真
 
 [浏览器]
-收集使用统计信息 = 真 = true
+收集使用统计信息 = 否 = false
